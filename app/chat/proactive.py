@@ -23,6 +23,14 @@ from .base import ChatAdapter
 
 log = get_logger("chat.proactive")
 
+# 内置的肥鱼主题短歌（/唱歌 时随机选一首，用 edge-tts 带旋律感朗读）
+_SONGS = [
+    "我是一只大肥鱼～游在蓝色的海里～尾鳍甩甩真得意～白米饭呀最欢喜～",
+    "主人主人快快来～听我唱个小曲儿～虽然有点跑调呀～但是心意满满呢～",
+    "一闪一闪亮晶晶～我的尾鳍会发光～爱吃白饭爱摸鱼～我是快乐大肥鱼～",
+    "白米饭呀白米饭～一天三顿都不腻～吃饱喝足趴着睡～梦里还在数饭粒～",
+]
+
 
 class ProactiveManager:
     def __init__(self, config: Config, adapter: ChatAdapter, handler: MessageHandler):
@@ -215,6 +223,18 @@ class ProactiveManager:
             return None
         return await gen(prompt)
 
+    async def _sing(self, user_id: int) -> None:
+        """随机唱一首内置短歌（edge-tts 带旋律感朗读），失败降级为文字。"""
+        song = random.choice(_SONGS)
+        if self._tts and self._tts.enabled:
+            audio = await self._tts.synthesize(song)
+            if audio:
+                ok = await self._adapter.send_voice("private", user_id, audio)
+                if ok:
+                    log.info("肥鱼唱了一首：%s", song[:30])
+                    return
+        await self._adapter.send_private(user_id, f"🎵 {song}")
+
     # ------------------------------------------------------------------ #
     # 主人指令
     # ------------------------------------------------------------------ #
@@ -238,6 +258,11 @@ class ProactiveManager:
                     await self._adapter.send_private(user_id, content)
             else:
                 await self._adapter.send_private(user_id, content)
+            return True
+
+        # /唱歌 指令：随机唱一首内置短歌
+        if text.startswith("/唱歌") or text.startswith("/sing"):
+            await self._sing(user_id)
             return True
 
         if not text.startswith("/send"):
