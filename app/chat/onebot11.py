@@ -114,6 +114,8 @@ class OneBot11Adapter(ChatAdapter):
         # 群聊历史缓冲（供 AI 决策的上下文）：group_id -> 最近消息列表
         self._group_history: Dict[int, List[str]] = {}
         self._history_max = int(listen.get("group_history_max", 10))
+        # 群最后活跃时间（供"冷场检测"主动活跃用）：group_id -> 时间戳
+        self._group_last_active: Dict[int, float] = {}
 
         self._running = False
         self._send_queue: "asyncio.Queue[str]" = asyncio.Queue()
@@ -433,8 +435,9 @@ class OneBot11Adapter(ChatAdapter):
             mentioned = bool(self_qq) and (f"@{self_qq}" in text or f"[@qq:{self_qq}]" in text)
             hit_keyword = any(kw in text for kw in self.group_keywords)
 
-            # 记录群聊历史（供 AI 决策的上下文）
+            # 记录群聊历史（供 AI 决策的上下文）与最后活跃时间
             self._append_history(group_id, f"{sender_nick}: {text}")
+            self._group_last_active[group_id] = time.time()
             log.info("收到group消息 来自 %s(%s) group=%s：%s", sender_nick, user_id, group_id, text)
 
             if self.group_reply_mode == "ai":
@@ -505,6 +508,13 @@ class OneBot11Adapter(ChatAdapter):
         if group_id is None:
             return ""
         return "\n".join(self._group_history.get(group_id, []))
+
+    def get_group_idle_seconds(self, group_id: int) -> float:
+        """返回该群距离最后一条消息的秒数（从未有消息则返回超大值）。"""
+        last = self._group_last_active.get(group_id)
+        if last is None:
+            return float("inf")
+        return time.time() - last
 
     async def _ai_decide(self, group_id: Optional[int], text: str) -> Optional[str]:
         """调用业务处理器的 decide_reply 做 AI 决策。返回 None=沉默，否则=回复内容。"""

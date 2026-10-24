@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -30,21 +31,20 @@ class ProactiveManager:
         self._enabled = bool(config.get("chat.proactive.enabled", False))
         self._tasks: List[Dict[str, Any]] = config.get("chat.proactive.tasks", []) or []
         self._owner = int(config.get("chat.owner", 0) or 0)
-        # 随机主动消息配置
-        rand = config.get("chat.proactive.random", {}) or {}
-        self._random_enabled = bool(rand.get("enabled", False))
-        self._interval_min = int(rand.get("interval_min", 1800))
-        self._interval_max = int(rand.get("interval_max", 7200))
-        self._random_type = str(rand.get("type", "private"))
-        self._random_target = int(rand.get("target", 0) or 0)
-        self._random_prompt = str(rand.get("prompt", "") or "")
-        self._pick_from_group = int(rand.get("pick_from_group", 0) or 0)
-        self._mention_ratio = float(rand.get("mention_ratio", 0.3))
-        self._emoji_ratio = float(rand.get("emoji_ratio", 0.2))
+        # 智能主动活跃配置（冷场驱动，非定时器）
+        act = config.get("chat.proactive.active", {}) or {}
+        self._active_enabled = bool(act.get("enabled", False))
+        self._idle_seconds = int(act.get("idle_minutes", 30)) * 60
+        self._check_interval = int(act.get("check_interval", 60))
+        self._active_groups: List[int] = [int(x) for x in (act.get("groups") or [])]
+        self._mention_ratio = float(act.get("mention_ratio", 0.3))
+        self._emoji_ratio = float(act.get("emoji_ratio", 0.2))
+        self._active_prompt = str(act.get("prompt", "") or "")
         self._emoji_dir = str(config.get("chat.proactive.emoji_dir", "assets/emojis"))
+        self._last_active_sent: Dict[int, float] = {}
         self._running = False
         self._task: Optional[asyncio.Task] = None
-        self._random_task: Optional[asyncio.Task] = None
+        self._active_task: Optional[asyncio.Task] = None
         self._fired_today: set = set()
         self._today = None
 
@@ -57,22 +57,22 @@ class ProactiveManager:
     # ------------------------------------------------------------------ #
     async def run(self) -> None:
         has_tasks = self._enabled and bool(self._tasks)
-        has_random = self._random_enabled and self._random_target and self._random_prompt
-        if not has_tasks and not has_random:
-            log.info("主动消息调度未启用（无定时任务，且随机发送未配置完整）")
+        has_active = self._active_enabled and self._active_groups and self._active_prompt
+        if not has_tasks and not has_active:
+            log.info("主动消息调度未启用（无定时任务，且智能活跃未配置完整）")
             return
         self._running = True
         if has_tasks:
             self._task = asyncio.create_task(self._scheduler_loop(), name="proactive-scheduler")
             log.info("主动消息定时调度启动，共 %d 个任务", len(self._tasks))
-        if has_random:
-            self._random_task = asyncio.create_task(self._random_loop(), name="proactive-random")
-            log.info("随机主动消息已启用（间隔 %d~%d 秒 -> %s %s）",
-                     self._interval_min, self._interval_max, self._random_type, self._random_target)
+        if has_active:
+            self._active_task = asyncio.create_task(self._active_loop(), name="proactive-active")
+            log.info("智能主动活跃已启用（群冷场 %d 分钟才主动，检查间隔 %d 秒，群=%s）",
+                     self._idle_seconds // 60, self._check_interval, self._active_groups)
 
     async def stop(self) -> None:
         self._running = False
-        tasks = [t for t in (self._task, self._random_task) if t]
+        tasks = [t for t in (self._task, self._active_task) if t]
         for t in tasks:
             if not t.done():
                 t.cancel()
@@ -107,53 +107,51 @@ class ProactiveManager:
             log.exception("定时主动任务执行失败：%s", task.get("name"))
 
     # ------------------------------------------------------------------ #
-    # 随机主动消息
+    # 智能主动活跃（冷场驱动）
     # ------------------------------------------------------------------ #
-    async def _random_loop(self) -> None:
-        """不定时随机主动冒泡：在 interval_min~interval_max 秒之间随机触发。"""
+    async def _active_loop(self) -> None:
+        """冷场检测：群里安静够久时，才主动找话题/发表情包/@人活跃气氛。"""
         while self._running:
-            wait = random.uniform(self._interval_min, self._interval_max)
-            log.info("随机主动消息：%.0f 秒后触发", wait)
-            await asyncio.sleep(wait)
-            if not self._running:
-                break
-            try:
-                if self._pick_from_group:
-                    await self._random_group_activity()
-                else:
-                    ok = await self.send_active(self._random_type, self._random_target, self._random_prompt)
-                    log.info("随机主动消息 %s -> %s：%s",
-                             self._random_type, self._random_target, "成功" if ok else "失败")
-            except Exception:
-                log.exception("随机主动消息发送失败")
+            await asyncio.sleep(self._check_interval)
+            for gid in self._active_groups:
+                try:
+                    idle = self._adapter.get_group_idle_seconds(gid)
+                    last_sent = self._last_active_sent.get(gid, 0)
+                    cooldown_ok = (time.time() - last_sent) >= self._idle_seconds
+                    if idle >= self._idle_seconds and cooldown_ok:
+                        log.info("群 %s 冷场 %.0f 秒，主动活跃", gid, idle)
+                        await self._active_once(gid)
+                except Exception:
+                    log.exception("主动活跃检查出错（群 %s）", gid)
 
-    async def _random_group_activity(self) -> None:
-        """随机群活跃：@人 / 发表情包 / 讲笑话抛话题（按比例随机）。"""
+    async def _active_once(self, gid: int) -> None:
+        """冷场后随机选择一种活跃方式：@人 / 发表情包 / 找话题。"""
+        self._last_active_sent[gid] = time.time()
         r = random.random()
         if r < self._mention_ratio:
-            await self._random_mention()
+            await self._active_mention(gid)
         elif r < self._mention_ratio + self._emoji_ratio:
-            await self._random_emoji()
+            await self._active_emoji(gid)
         else:
-            await self._random_text()
+            await self._active_topic(gid)
 
-    async def _random_mention(self) -> None:
+    async def _active_mention(self, gid: int) -> None:
         """随机 @ 一个群成员打招呼。"""
-        members = await self._adapter.get_group_member_list(self._pick_from_group)
+        members = await self._adapter.get_group_member_list(gid)
         self_qq = int(getattr(self._adapter, "self_id", 0) or 0)
         members = [m for m in members if m.get("user_id") != self_qq]
         if not members:
-            log.warning("群 %s 无可用成员，跳过 @", self._pick_from_group)
+            log.warning("群 %s 无可用成员，跳过 @", gid)
             return
         chosen = random.choice(members)
-        content = await self._generate(self._random_prompt)
+        content = await self._generate(self._active_prompt)
         if content:
             mention = f"[CQ:at,qq={chosen['user_id']}]"
-            ok = await self._adapter.send_group(self._pick_from_group, f"{mention} {content}")
-            log.info("群里随机@ %s(%s)：%s（%s）",
+            ok = await self._adapter.send_group(gid, f"{mention} {content}")
+            log.info("冷场活跃 @%s(%s)：%s（%s）",
                      chosen["nickname"], chosen["user_id"], content[:100], "成功" if ok else "失败")
 
-    async def _random_emoji(self) -> None:
+    async def _active_emoji(self, gid: int) -> None:
         """从表情包目录随机选一张图发到群里。"""
         import glob
         import os
@@ -166,15 +164,22 @@ class ProactiveManager:
             log.warning("表情包目录 %s 为空，跳过发表情包", self._emoji_dir)
             return
         img = random.choice(files)
-        ok = await self._adapter.send_image("group", self._pick_from_group, img)
-        log.info("群里发表情包 %s（%s）", os.path.basename(img), "成功" if ok else "失败")
+        ok = await self._adapter.send_image("group", gid, img)
+        log.info("冷场活跃发表情包 %s（%s）", os.path.basename(img), "成功" if ok else "失败")
 
-    async def _random_text(self) -> None:
-        """直接发文字内容（讲笑话/抛话题/分享）。"""
-        content = await self._generate(self._random_prompt)
+    async def _active_topic(self, gid: int) -> None:
+        """基于群历史主动找话题（结合最近聊天内容，自然不突兀）。"""
+        hist = ""
+        get_hist = getattr(self._adapter, "_get_history", None)
+        if callable(get_hist):
+            hist = get_hist(gid) or ""
+        prompt = self._active_prompt
+        if hist:
+            prompt = f"{prompt}\n\n群里最近聊到的内容（供你自然衔接话题，不要重复）：\n{hist}"
+        content = await self._generate(prompt)
         if content:
-            ok = await self._adapter.send_group(self._pick_from_group, content)
-            log.info("群里主动发话题：%s（%s）", content[:100], "成功" if ok else "失败")
+            ok = await self._adapter.send_group(gid, content)
+            log.info("冷场活跃找话题：%s（%s）", content[:100], "成功" if ok else "失败")
 
     # ------------------------------------------------------------------ #
     # 主动发送（AI 生成内容）

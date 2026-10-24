@@ -80,19 +80,17 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         },
         "owner": 0,                # 主人 QQ 号（/send 指令权限校验），0=不校验
         "proactive": {
-            "enabled": False,      # 是否启用主动消息调度
+            "enabled": False,      # 是否启用定时任务调度
             "tasks": [],           # 定时任务列表
-            "emoji_dir": "assets/emojis",  # 表情包目录（随机发表情包用）
-            "random": {            # 随机主动消息（不定时冒泡）
+            "emoji_dir": "assets/emojis",  # 表情包目录
+            "active": {            # 智能主动活跃（冷场驱动，非定时器）
                 "enabled": False,
-                "interval_min": 7200,   # 最小间隔（秒）
-                "interval_max": 43200,  # 最大间隔（秒）
-                "type": "private",      # private=私聊 / group=群聊
-                "target": 0,            # 目标 QQ 号或群号
-                "prompt": "",           # 内容提示词（AI 自由发挥）
-                "pick_from_group": 0,   # 在该群活跃（0=用固定 target）
-                "mention_ratio": 0.3,   # @ 人的概率
-                "emoji_ratio": 0.2,     # 发表情包的概率（其余发文字内容）
+                "idle_minutes": 30,     # 群冷场多久才主动（分钟）
+                "check_interval": 60,   # 检查间隔（秒）
+                "groups": [],           # 要主动活跃的群列表
+                "mention_ratio": 0.3,   # 活跃方式：@ 人概率
+                "emoji_ratio": 0.2,     # 活跃方式：发表情包概率（其余找话题）
+                "prompt": "",           # 找话题的提示词
             },
         },
     },
