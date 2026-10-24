@@ -93,6 +93,11 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
                 "prompt": "",           # 找话题的提示词
             },
         },
+        "face": {                 # QQ 内置小黄脸表情（回复时随机附带）
+            "enabled": False,
+            "ratio": 0.3,         # 附带概率
+            "ids": [21, 14, 178, 76, 175, 96],  # 可爱/偷笑/笑哭/害羞/爱你/尴尬
+        },
     },
     "business": {
         "handler": "echo",  # echo | deepseek

@@ -89,6 +89,11 @@ class OneBot11Adapter(ChatAdapter):
         self._tts_reply_mode = str(tts_cfg.get("reply_mode", "off"))
         self._tts_reply_ratio = float(tts_cfg.get("reply_ratio", 0.3))
         self._tts_reply_in_group = bool(tts_cfg.get("reply_in_group", False))
+        # QQ 表情配置（回复时随机附带小黄脸）
+        face_cfg = config.get("chat.face", {}) or {}
+        self._face_enabled = bool(face_cfg.get("enabled", False))
+        self._face_ratio = float(face_cfg.get("ratio", 0.3))
+        self._face_ids = [int(x) for x in (face_cfg.get("ids") or [21, 14, 178, 76, 175, 96])]
 
         self.mode = config.get("chat.onebot11.mode", "reverse")
         self.access_token = config.get("chat.onebot11.access_token", "")
@@ -222,6 +227,29 @@ class OneBot11Adapter(ChatAdapter):
             log.error("读取语音失败 %s：%s", audio_path, exc)
             return False
         message: List[Dict[str, Any]] = [{"type": "record", "data": {"file": f"base64://{data}"}}]
+        params: Dict[str, Any] = {"message_type": message_type, "message": message}
+        if message_type == "group":
+            params["group_id"] = int(target)
+        else:
+            params["user_id"] = int(target)
+        return await self._send_action("send_msg", params)
+
+    async def send_face(self, message_type: str, target: int, face_id: int) -> bool:
+        """发送一个 QQ 内置表情（小黄脸）。"""
+        message: List[Dict[str, Any]] = [{"type": "face", "data": {"id": str(face_id)}}]
+        params: Dict[str, Any] = {"message_type": message_type, "message": message}
+        if message_type == "group":
+            params["group_id"] = int(target)
+        else:
+            params["user_id"] = int(target)
+        return await self._send_action("send_msg", params)
+
+    async def send_text_face(self, message_type: str, target: int, text: str, face_id: int) -> bool:
+        """发送一条「文字 + QQ 表情」合并消息。"""
+        message: List[Dict[str, Any]] = [
+            {"type": "text", "data": {"text": text}},
+            {"type": "face", "data": {"id": str(face_id)}},
+        ]
         params: Dict[str, Any] = {"message_type": message_type, "message": message}
         if message_type == "group":
             params["group_id"] = int(target)
@@ -515,6 +543,11 @@ class OneBot11Adapter(ChatAdapter):
                 ok = await self._voice_reply(message_type, user_id, group_id, reply)
             else:
                 ok = await ctx.reply(reply)
+                # 随机附带一个 QQ 小黄脸表情
+                if ok and self._face_enabled and random.random() < self._face_ratio:
+                    target = user_id if message_type == "private" else group_id
+                    if target:
+                        await self.send_face(message_type, target, random.choice(self._face_ids))
             log.info("回复%s消息 -> %s(%s) %s：%s",
                      message_type, nickname, user_id,
                      "成功" if ok else "失败", reply[:200])
