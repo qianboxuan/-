@@ -14,7 +14,7 @@ import random
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from ..business.handler import MessageHandler
+from ..business.handler import MessageHandler, split_long_reply
 from ..config import Config
 from ..logging_setup import get_logger
 from .base import ChatAdapter
@@ -180,7 +180,7 @@ class ProactiveManager:
     # 主动发送（AI 生成内容）
     # ------------------------------------------------------------------ #
     async def send_active(self, message_type: str, target: int, prompt: str) -> bool:
-        """生成内容并主动发送到指定会话。"""
+        """生成内容并主动发送到指定会话（长内容自动分段）。"""
         if not prompt:
             log.warning("主动发送缺少 prompt，已取消")
             return False
@@ -188,10 +188,16 @@ class ProactiveManager:
         if not content:
             log.warning("内容生成失败，取消发送")
             return False
-        if message_type == "group":
-            ok = await self._adapter.send_group(target, content)
-        else:
-            ok = await self._adapter.send_private(target, content)
+        segments = split_long_reply(content)
+        ok = True
+        for i, seg in enumerate(segments):
+            if message_type == "group":
+                r = await self._adapter.send_group(target, seg)
+            else:
+                r = await self._adapter.send_private(target, seg)
+            ok = ok and r
+            if i < len(segments) - 1:
+                await asyncio.sleep(0.6)
         log.info("主动发送 %s -> %s：%s", message_type, target, content[:120])
         return ok
 

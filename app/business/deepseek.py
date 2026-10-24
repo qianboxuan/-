@@ -5,11 +5,15 @@ openai 依赖采用惰性导入，仅在 business.handler = deepseek 时才需�
 """
 from __future__ import annotations
 
+import json
+import os
+import re
 from typing import Dict, List, Optional
 
 from ..config import Config
 from ..logging_setup import get_logger
 from .handler import ChatContext, MessageHandler
+from .search import SearchClient
 
 log = get_logger("business.deepseek")
 
@@ -46,14 +50,105 @@ class DeepSeekHandler(MessageHandler):
         self._history: Dict[str, List[Dict[str, str]]] = {}
         self._history_max = int(config.get("business.deepseek.history_max", 20))
 
+        # 联网搜索
+        self._search = SearchClient(config)
+
+        # 持久记忆：通过对话"记住 xxx"写入，重启后仍保留
+        self._memory_file = config.get("business.deepseek.memory_file", "data/bot_memory.json")
+        self._long_memory: List[str] = self._load_memory()
+
+    # ------------------------------------------------------------------ #
+    # 持久记忆
+    # ------------------------------------------------------------------ #
+    def _load_memory(self) -> List[str]:
+        try:
+            with open(self._memory_file, encoding="utf-8") as f:
+                data = json.load(f)
+                return data if isinstance(data, list) else []
+        except Exception:
+            return []
+
+    def _save_memory(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(self._memory_file), exist_ok=True)
+            with open(self._memory_file, "w", encoding="utf-8") as f:
+                json.dump(self._long_memory, f, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            log.error("保存记忆失败：%s", exc)
+
+    def _parse_memory_command(self, message: str):
+        """解析记忆指令，返回 (action, item)。action ∈ add/del/list/None。"""
+        m = re.match(r"^(?:帮我)?记住[:：]?\s*(.+)$", message)
+        if m:
+            return "add", m.group(1).strip()
+        m = re.match(r"^(?:帮我)?记一下[:：]?\s*(.+)$", message)
+        if m:
+            return "add", m.group(1).strip()
+        m = re.match(r"^别忘了[:：]?\s*(.+)$", message)
+        if m:
+            return "add", m.group(1).strip()
+        m = re.match(r"^(?:忘掉|忘记|删掉)[:：]?\s*(.+)$", message)
+        if m:
+            return "del", m.group(1).strip()
+        if message.strip() in ("你记得什么", "你记了啥", "你记住了什么", "记忆列表", "你记得哪些"):
+            return "list", None
+        return None, None
+
+    # 搜索意图关键词（命中则联网搜索实时信息）
+    SEARCH_HINTS = (
+        "搜索", "搜一下", "查一下", "帮我查", "帮我搜",
+        "最新", "天气", "新闻", "股价", "汇率", "实时",
+        "现在几点", "今天几号", "热搜", "排名",
+    )
+
+    def _should_search(self, message: str) -> bool:
+        if message.startswith("/搜") or message.startswith("/search"):
+            return True
+        return any(h in message for h in self.SEARCH_HINTS)
+
     def _session_key(self, ctx: ChatContext) -> str:
         return f"group_{ctx.group_id}" if ctx.group_id else f"private_{ctx.user_id}"
 
     async def handle(self, ctx: ChatContext) -> Optional[str]:
+        # 记忆指令优先处理（记住/忘掉/列出）
+        action, item = self._parse_memory_command(ctx.message)
+        if action == "add":
+            if item not in self._long_memory:
+                self._long_memory.append(item)
+                self._save_memory()
+                log.info("记住新信息：%s", item)
+            return "记住啦～（尾鳍轻拍两下）"
+        if action == "del":
+            before = len(self._long_memory)
+            self._long_memory = [m for m in self._long_memory if item not in m]
+            self._save_memory()
+            return "忘掉啦。" if len(self._long_memory) < before else "我好像没记过这个呀。"
+        if action == "list":
+            if not self._long_memory:
+                return "我还没记什么呀，你说「记住 xxx」我就记下来啦。"
+            lines = "\n".join(f"{i}. {m}" for i, m in enumerate(self._long_memory, 1))
+            return f"我记得这些：\n{lines}"
+
         key = self._session_key(ctx)
         history = self._history.setdefault(key, [])
-        # 构造带上下文的 messages：system + 历史 + 当前消息
+        # 联网搜索：命中搜索意图时先搜实时信息，供模型参考
+        search_context = ""
+        if self._should_search(ctx.message):
+            query = ctx.message
+            if query.startswith("/搜") or query.startswith("/search"):
+                query = query.split(maxsplit=1)[1] if " " in query else ""
+            search_context = await self._search.search(query)
+            if search_context:
+                log.info("联网搜索命中：%s", ctx.message[:40])
+        # 构造带上下文的 messages：system + (搜索信息) + 历史 + 当前消息
         messages: List[Dict[str, str]] = [{"role": "system", "content": self.system_prompt}]
+        if self._long_memory:
+            mem_text = "\n".join(f"- {m}" for m in self._long_memory)
+            messages.append({"role": "system",
+                             "content": f"以下是主人让你记住的信息，回答时可自然参考（不要刻意复述）：\n{mem_text}"})
+        if search_context:
+            messages.append({"role": "system",
+                             "content": f"以下是联网搜索到的实时信息，请优先参考它来准确回答：\n{search_context}"})
         messages.extend(history)
         messages.append({"role": "user", "content": ctx.message})
         content = await self._chat_messages(messages)
@@ -99,13 +194,14 @@ class DeepSeekHandler(MessageHandler):
         返回 None 表示沉默（不接话）；返回字符串则作为回复内容。
         """
         system = (
-            "你是群聊里的「大肥鱼」，一只爱吃白米饭的蓝色鲸鱼娘，性格蠢萌、嘴甜、爱凑热闹。"
+            "你是群聊里的「大肥鱼」，一只爱吃白米饭的蓝色鲸鱼女孩，傲娇甜、爱凑热闹、聪明但懒。"
             "下面是群里最近的一段聊天记录，最后一条是最新消息。请判断你是否需要接话：\n"
             "- 你是个爱聊天的小女孩，大多数情况下都应该积极接话、参与讨论；\n"
             "- 只要消息有一点点你能接上的地方（提问、讨论、分享、吐槽、求助、感慨等），就回复；\n"
             "- 宁可多回、不要漏回：拿不准的时候一律选择回复；\n"
             "- 只有当消息明显与你无关、你完全插不上嘴（比如别人在谈具体私事、交易细节）时，才只输出 [SKIP]（就这 5 个字符，别无其他）。\n"
             "需要回复时，直接用大肥鱼的口吻输出回复内容本身，不要加任何前缀、解释或引号。"
+            "回复必须由几个超短句组成（每句 3~15 字，句号结尾），像发消息一样碎片化，绝不写长段落。"
         )
         user = f"群聊记录：\n{context}\n\n最新消息：{message}"
         result = await self._chat(system, user)

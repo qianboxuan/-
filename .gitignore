@@ -8,6 +8,7 @@ venv/
 # 本地配置与敏感信息
 config.yaml
 .env
+data/
 
 # 日志
 logs/

@@ -107,6 +107,7 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
             "max_tokens": 1024,
             "timeout": 60,
             "history_max": 20,   # 会话记忆：每个会话保留的最近消息条数（每轮=user+assistant 两条）
+            "memory_file": "data/bot_memory.json",  # 持久记忆文件（通过对话"记住 xxx"写入）
         },
         "vision": {               # 识图用的视觉模型
             "enabled": False,
@@ -115,6 +116,11 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
             "base_url": "",       # 空=按 provider 自动填
             "model": "",          # 空=按 provider 自动填
             "timeout": 60,
+        },
+        "search": {               # 联网搜索（复用 DeepSeek key）
+            "enabled": True,
+            "timeout": 20,
+            "count": 5,           # 每次搜索返回的结果条数
         },
     },
     "logging": {

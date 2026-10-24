@@ -6,12 +6,45 @@
 """
 from __future__ import annotations
 
+import asyncio
+import re
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
     from ..chat.base import ChatAdapter
+
+
+def split_long_reply(text: str, max_len: int = 20) -> List[str]:
+    """把回复拆成多条超短消息，每个短句一条（模拟真人碎片化发消息）。
+
+    - 按句末标点（。！？~～…换行）拆分，一句一条；
+    - 单句超过 max_len 时再按逗号细拆。
+    """
+    sentences = re.split(r"(?<=[。！？!?~～…])", text)
+    result: List[str] = []
+    for s in sentences:
+        s = s.strip()
+        if not s:
+            continue
+        if len(s) > max_len:
+            subs = re.split(r"(?<=[，,、：:；;])", s)
+            cur = ""
+            for sub in subs:
+                sub = sub.strip()
+                if not sub:
+                    continue
+                if cur and len(cur) + len(sub) > max_len:
+                    result.append(cur)
+                    cur = sub
+                else:
+                    cur += sub
+            if cur:
+                result.append(cur)
+        else:
+            result.append(s)
+    return result or [text]
 
 
 @dataclass
@@ -27,12 +60,21 @@ class ChatContext:
     sender_nickname: str = ""            # 发送者昵称/群名片
 
     async def reply(self, text: str) -> bool:
-        """向消息来源会话回复文本（业务逻辑可直接调用）。"""
+        """向消息来源会话回复文本；长文本自动分段逐条发送（模拟真人聊天）。"""
         if not text:
             return True
-        if self.message_type == "group" and self.group_id:
-            return await self.adapter.send_group(self.group_id, text)
-        return await self.adapter.send_private(self.user_id, text)
+        segments = split_long_reply(text)
+        ok = True
+        for i, seg in enumerate(segments):
+            if self.message_type == "group" and self.group_id:
+                r = await self.adapter.send_group(self.group_id, seg)
+            else:
+                r = await self.adapter.send_private(self.user_id, seg)
+            ok = ok and r
+            # 多条之间稍作停顿，模拟真人打字节奏
+            if i < len(segments) - 1:
+                await asyncio.sleep(0.6)
+        return ok
 
 
 class MessageHandler(ABC):
