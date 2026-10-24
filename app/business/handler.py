@@ -20,9 +20,22 @@ def split_long_reply(text: str, max_len: int = 20) -> List[str]:
     """把回复拆成多条超短消息，每个短句一条（模拟真人碎片化发消息）。
 
     - 按句末标点（。！？~～…换行）拆分，一句一条；
-    - 单句超过 max_len 时再按逗号细拆。
+    - 单句超过 max_len 时再按逗号细拆；
+    - 保护 CQ 码（如 [CQ:face,id=21]），避免被逗号/冒号拆分拆坏。
     """
-    sentences = re.split(r"(?<=[。！？!?~～…])", text)
+    # 保护 CQ 码：用占位符替换，拆分后再还原
+    cq_codes: List[str] = []
+
+    def _protect(m: "re.Match") -> str:
+        cq_codes.append(m.group(0))
+        return f"\x00CQ{len(cq_codes) - 1}\x00"
+
+    def _restore(m: "re.Match") -> str:
+        return cq_codes[int(m.group(1))]
+
+    protected = re.sub(r"\[CQ:[^\]]*\]", _protect, text)
+
+    sentences = re.split(r"(?<=[。！？!?~～…])", protected)
     result: List[str] = []
     for s in sentences:
         s = s.strip()
@@ -44,7 +57,8 @@ def split_long_reply(text: str, max_len: int = 20) -> List[str]:
                 result.append(cur)
         else:
             result.append(s)
-    return result or [text]
+    restored = [re.sub(r"\x00CQ(\d+)\x00", _restore, r) for r in result]
+    return restored or [text]
 
 
 @dataclass

@@ -98,6 +98,12 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
             "ratio": 0.3,         # 附带概率
             "ids": [21, 14, 178, 76, 175, 96],  # 可爱/偷笑/笑哭/害羞/爱你/尴尬
         },
+        "sticker": {              # 收藏的自定义表情图片（斗图），回复时主动随机发
+            "enabled": False,
+            "ratio": 0.2,         # 主动发概率
+            "cache_seconds": 600, # 收藏表情列表缓存时长（秒），避免每次回复都调接口
+            "in_group": True,     # 群聊是否也发
+        },
     },
     "business": {
         "handler": "echo",  # echo | deepseek

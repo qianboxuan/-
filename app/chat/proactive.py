@@ -251,17 +251,46 @@ class ProactiveManager:
                     return
         await self._adapter.send_private(user_id, f"🎵 {song}")
 
-    async def _send_custom_face(self, user_id: int) -> None:
-        """随机发一个 QQ 收藏表情（自定义斗图）。"""
-        faces = await self._adapter.get_custom_faces()
+    def _parse_sticker_intent(self, text: str) -> bool:
+        """识别自然语言的「发表情」意图（发个表情 / 来张表情包 / 斗图等）。"""
+        t = text.strip()
+        if not t:
+            return False
+        # 动词 + 表情/表情包/斗图/图（带或不带量词）
+        if re.search(r"(发|来|甩|给|整|丢|上)[个张点]*(?:的)?(?:表情|表情包|斗图|图)", t):
+            return True
+        # 短消息里单独出现「表情包 / 斗图」
+        if len(t) <= 10 and ("表情包" in t or "斗图" in t):
+            return True
+        return False
+
+    async def _send_custom_face(self, message_type: str, target: int) -> None:
+        """随机发一个 QQ 收藏表情（自定义斗图）。支持私聊和群聊。"""
+        faces = await self._adapter.get_custom_faces_cached()
         if not faces:
-            await self._adapter.send_private(user_id, "没拿到收藏表情～可能是你还没收藏表情，或接口不可用")
+            msg = "没拿到收藏表情～可能是你还没收藏表情，或接口不可用"
+            if message_type == "group":
+                await self._adapter.send_group(target, msg)
+            else:
+                await self._adapter.send_private(target, msg)
             return
         face = random.choice(faces)
-        ok = await self._adapter.send_image_ref("private", user_id, face)
+        ok = await self._adapter.send_image_ref(message_type, target, face)
         if not ok:
-            await self._adapter.send_private(user_id, "表情发送失败了，看看日志")
+            msg = "表情发送失败了，看看日志"
+            if message_type == "group":
+                await self._adapter.send_group(target, msg)
+            else:
+                await self._adapter.send_private(target, msg)
             log.warning("收藏表情发送失败：%s", str(face)[:100])
+
+    async def handle_group_sticker(self, text: str, group_id: int) -> bool:
+        """群聊发表情意图（/表情 或自然语言「发个表情」）。命中则发收藏表情到群里。"""
+        t = text.strip()
+        if not (t.startswith("/表情") or t.startswith("/收藏表情") or self._parse_sticker_intent(t)):
+            return False
+        await self._send_custom_face("group", group_id)
+        return True
 
     # ------------------------------------------------------------------ #
     # 主人指令
@@ -301,7 +330,12 @@ class ProactiveManager:
 
         # /表情 指令：随机发一个收藏表情
         if text.startswith("/表情") or text.startswith("/收藏表情"):
-            await self._send_custom_face(user_id)
+            await self._send_custom_face("private", user_id)
+            return True
+
+        # 自然语言发表情意图（发个表情 / 来张表情包 / 斗图等）
+        if self._parse_sticker_intent(text):
+            await self._send_custom_face("private", user_id)
             return True
 
         if not text.startswith("/send"):

@@ -95,6 +95,14 @@ class OneBot11Adapter(ChatAdapter):
         self._face_enabled = bool(face_cfg.get("enabled", False))
         self._face_ratio = float(face_cfg.get("ratio", 0.3))
         self._face_ids = [int(x) for x in (face_cfg.get("ids") or [21, 14, 178, 76, 175, 96])]
+        # 收藏表情（自定义斗图）配置：回复时主动随机发
+        sticker_cfg = config.get("chat.sticker", {}) or {}
+        self._sticker_enabled = bool(sticker_cfg.get("enabled", False))
+        self._sticker_ratio = float(sticker_cfg.get("ratio", 0.2))
+        self._sticker_cache_seconds = int(sticker_cfg.get("cache_seconds", 600))
+        self._sticker_in_group = bool(sticker_cfg.get("in_group", True))
+        self._sticker_cache: List[str] = []
+        self._sticker_cache_time: float = 0.0
 
         self.mode = config.get("chat.onebot11.mode", "reverse")
         self.access_token = config.get("chat.onebot11.access_token", "")
@@ -269,6 +277,11 @@ class OneBot11Adapter(ChatAdapter):
         return await self._send_action("send_msg", params)
 
     @staticmethod
+    def _convert_face(text: str) -> str:
+        """把 [face:ID] 标记转换成 CQ 码 [CQ:face,id=ID]，NapCat 会渲染成表情。"""
+        return re.sub(r"\[face:(\d+)\]", r"[CQ:face,id=\1]", text)
+
+    @staticmethod
     def _build_segments(text: str) -> List[Dict[str, Any]]:
         """把 [face:ID] 标记解析成 text + face 段交错的消息数组。"""
         segments: List[Dict[str, Any]] = []
@@ -342,14 +355,14 @@ class OneBot11Adapter(ChatAdapter):
 
     async def get_custom_faces(self) -> List[str]:
         """获取 QQ 收藏表情的图片 file/url 列表（fetch_custom_face）。失败返回空列表。"""
-        data = await self._call_api("fetch_custom_face", {})
+        data = await self._call_api("fetch_custom_face", {"count": 50}, timeout=30.0)
         result: List[str] = []
         if isinstance(data, list):
             for x in data:
                 if isinstance(x, str) and x:
                     result.append(x)
                 elif isinstance(x, dict):
-                    for k in ("url", "file", "path"):
+                    for k in ("url", "file", "path", "src", "md5"):
                         if x.get(k):
                             result.append(str(x[k]))
                             break
@@ -360,13 +373,53 @@ class OneBot11Adapter(ChatAdapter):
                         if isinstance(x, str) and x:
                             result.append(x)
                         elif isinstance(x, dict):
-                            for kk in ("url", "file", "path"):
+                            for kk in ("url", "file", "path", "src", "md5"):
                                 if x.get(kk):
                                     result.append(str(x[kk]))
                                     break
         if not result:
-            log.warning("fetch_custom_face 未返回表情（原始：%s）", str(data)[:200])
+            log.warning("fetch_custom_face 未返回表情（原始：%s）", str(data)[:400])
+        else:
+            log.info("获取到收藏表情 %d 个，示例：%s", len(result), str(result[0])[:120])
         return result
+
+    async def get_custom_faces_cached(self) -> List[str]:
+        """带缓存地获取收藏表情列表（避免每次回复都调接口）。缓存过期才重新拉取。"""
+        now = time.time()
+        if self._sticker_cache and (now - self._sticker_cache_time) < self._sticker_cache_seconds:
+            return self._sticker_cache
+        faces = await self.get_custom_faces()
+        self._sticker_cache = faces
+        self._sticker_cache_time = now
+        return faces
+
+    async def _warmup_stickers(self) -> None:
+        """连入后预热：主动拉取一次收藏表情，验证接口可用并填充缓存。"""
+        try:
+            faces = await self.get_custom_faces()
+            if faces:
+                self._sticker_cache = faces
+                self._sticker_cache_time = time.time()
+                log.info("收藏表情预热成功：%d 个", len(faces))
+        except Exception:
+            log.exception("收藏表情预热失败")
+
+    async def maybe_send_sticker(self, message_type: str, target: int) -> bool:
+        """按概率主动发一张收藏的自定义表情图片（斗图）。返回是否真的发了。"""
+        if not self._sticker_enabled:
+            return False
+        if message_type == "group" and not self._sticker_in_group:
+            return False
+        if random.random() >= self._sticker_ratio:
+            return False
+        faces = await self.get_custom_faces_cached()
+        if not faces:
+            return False
+        face = random.choice(faces)
+        ok = await self.send_image_ref(message_type, target, face)
+        if ok:
+            log.info("主动发收藏表情 -> %s(%s)：%s", message_type, target, str(face)[:80])
+        return ok
 
     async def _sender_loop(self) -> None:
         """单一写者：串行地把待发消息写入当前 WebSocket 连接。"""
@@ -459,6 +512,9 @@ class OneBot11Adapter(ChatAdapter):
         log.info("协议端已连入：%s", peer)
         self._ws = ws
         self._last_event_time = time.monotonic()
+        # 预热：若启用了收藏表情，连入后主动拉取一次（顺带验证接口可用性）
+        if self._sticker_enabled:
+            asyncio.create_task(self._warmup_stickers())
         try:
             async for raw in ws:
                 self._last_event_time = time.monotonic()
@@ -565,6 +621,14 @@ class OneBot11Adapter(ChatAdapter):
             self._group_last_active[group_id] = time.time()
             log.info("收到group消息 来自 %s(%s) group=%s：%s", sender_nick, user_id, group_id, text)
 
+            # 群聊发表情意图：/表情 或自然语言「发个表情」，直接发收藏表情到群里
+            if self._proactive is not None:
+                try:
+                    if await self._proactive.handle_group_sticker(text, group_id):
+                        return
+                except Exception:
+                    log.exception("处理群聊发表情指令出错")
+
             if self.group_reply_mode == "ai":
                 # AI 决策模式：@或关键词直接回；否则交给 AI 联系上下文判断是否接话
                 if not mentioned and not hit_keyword:
@@ -572,7 +636,8 @@ class OneBot11Adapter(ChatAdapter):
                     if decision is None:
                         log.info("AI 决策：不接话 group=%s（%s）", group_id, text[:60])
                         return
-                    # AI 决定接话，直接回复
+                    # AI 决定接话，直接回复（把 [face:ID] 转 CQ 码渲染成表情）
+                    decision = self._convert_face(decision)
                     ok = await self.send_group(group_id, decision)
                     self._append_history(group_id, f"肥鱼: {decision}")
                     log.info("AI主动接话 -> group=%s %s：%s",
@@ -613,18 +678,24 @@ class OneBot11Adapter(ChatAdapter):
         )
         reply = await self._handler.handle(ctx)
         if reply:
-            if self._should_voice_reply(message_type):
-                ok = await self._voice_reply(message_type, user_id, group_id, reply)
-            elif "[face:" in reply:
-                # 话中已穿插表情，解析成段后分段发送
-                ok = await self._reply_with_faces(message_type, user_id, group_id, reply)
+            if self._should_voice_reply(message_type) and not image_segs:
+                # 语音回复（有图片时不用语音，改用文字描述）
+                voice_text = re.sub(r"\[face:\d+\]", "", reply)
+                ok = await self._voice_reply(message_type, user_id, group_id, voice_text)
             else:
+                # 文字回复：把 [face:ID] 转成 CQ 码，渲染成表情
+                reply = self._convert_face(reply)
                 ok = await ctx.reply(reply)
                 # 兜底：随机附带一个 QQ 小黄脸表情
                 if ok and self._face_enabled and random.random() < self._face_ratio:
                     target = user_id if message_type == "private" else group_id
                     if target:
                         await self.send_face(message_type, target, random.choice(self._face_ids))
+                # 主动随机发一张收藏的自定义表情图片（斗图）
+                if ok:
+                    target = user_id if message_type == "private" else group_id
+                    if target:
+                        await self.maybe_send_sticker(message_type, target)
             log.info("回复%s消息 -> %s(%s) %s：%s",
                      message_type, nickname, user_id,
                      "成功" if ok else "失败", reply[:200])
