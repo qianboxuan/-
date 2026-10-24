@@ -10,6 +10,7 @@ from app.chat.proactive import ProactiveManager
 from app.business.deepseek import DeepSeekHandler
 from app.business.echo import EchoHandler
 from app.business.handler import MessageHandler
+from app.business.tts import TTSClient
 from app.business.vision import VisionClient
 from app.config import Config, load_config
 from app.logging_setup import get_logger, setup_logging
@@ -33,12 +34,12 @@ def build_handler(config: Config) -> MessageHandler:
     return cls(config) if name == "deepseek" else cls()
 
 
-def build_adapter(config: Config, handler: MessageHandler, vision: VisionClient = None) -> ChatAdapter:
+def build_adapter(config: Config, handler: MessageHandler, vision: VisionClient = None, tts: TTSClient = None) -> ChatAdapter:
     name = config.get("chat.adapter", "onebot11")
     cls = ADAPTERS.get(name)
     if cls is None:
         raise RuntimeError(f"未知的聊天适配器：{name}（可选：{', '.join(ADAPTERS)}）")
-    return cls(config, handler, vision=vision)
+    return cls(config, handler, vision=vision, tts=tts)
 
 
 async def async_main() -> None:
@@ -48,7 +49,8 @@ async def async_main() -> None:
 
     handler = build_handler(config)
     vision = VisionClient(config)
-    adapter = build_adapter(config, handler, vision=vision)
+    tts = TTSClient(config)
+    adapter = build_adapter(config, handler, vision=vision, tts=tts)
 
     # 主动消息调度器（定时任务 + 主人 /send 指令），独立于消息接收链路
     proactive = ProactiveManager(config, adapter, handler)

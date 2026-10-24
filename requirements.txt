@@ -6,3 +6,7 @@ python-dotenv>=1.0
 # ===== 业务逻辑：DeepSeek 处理器（官方 OpenAI 兼容接口）=====
 # 仅当 business.handler = deepseek 时需要；echo 模式可跳过
 openai>=1.30,<3
+
+# ===== 文字转语音（发语音消息，/语音 指令）=====
+# 微软 Edge TTS，免费无需 key
+edge-tts>=7.0

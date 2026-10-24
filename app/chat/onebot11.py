@@ -78,11 +78,17 @@ def _new_echo() -> str:
 class OneBot11Adapter(ChatAdapter):
     name = "onebot11"
 
-    def __init__(self, config: Config, handler: MessageHandler, proactive=None, vision=None):
+    def __init__(self, config: Config, handler: MessageHandler, proactive=None, vision=None, tts=None):
         self._config = config
         self._handler = handler
         self._proactive = proactive
         self._vision = vision
+        self._tts = tts
+        # 语音回复配置
+        tts_cfg = config.get("business.tts", {}) or {}
+        self._tts_reply_mode = str(tts_cfg.get("reply_mode", "off"))
+        self._tts_reply_ratio = float(tts_cfg.get("reply_ratio", 0.3))
+        self._tts_reply_in_group = bool(tts_cfg.get("reply_in_group", False))
 
         self.mode = config.get("chat.onebot11.mode", "reverse")
         self.access_token = config.get("chat.onebot11.access_token", "")
@@ -200,6 +206,23 @@ class OneBot11Adapter(ChatAdapter):
             "message_type": message_type,
             "message": message,
         }
+        if message_type == "group":
+            params["group_id"] = int(target)
+        else:
+            params["user_id"] = int(target)
+        return await self._send_action("send_msg", params)
+
+    async def send_voice(self, message_type: str, target: int, audio_path: str) -> bool:
+        """发送一段本地语音（base64）。"""
+        import base64
+        try:
+            with open(audio_path, "rb") as f:
+                data = base64.b64encode(f.read()).decode()
+        except Exception as exc:
+            log.error("读取语音失败 %s：%s", audio_path, exc)
+            return False
+        message: List[Dict[str, Any]] = [{"type": "record", "data": {"file": f"base64://{data}"}}]
+        params: Dict[str, Any] = {"message_type": message_type, "message": message}
         if message_type == "group":
             params["group_id"] = int(target)
         else:
@@ -488,10 +511,42 @@ class OneBot11Adapter(ChatAdapter):
         )
         reply = await self._handler.handle(ctx)
         if reply:
-            ok = await ctx.reply(reply)
+            if self._should_voice_reply(message_type):
+                ok = await self._voice_reply(message_type, user_id, group_id, reply)
+            else:
+                ok = await ctx.reply(reply)
             log.info("回复%s消息 -> %s(%s) %s：%s",
                      message_type, nickname, user_id,
                      "成功" if ok else "失败", reply[:200])
+
+    # ------------------------------------------------------------------ #
+    # 语音回复
+    # ------------------------------------------------------------------ #
+    def _should_voice_reply(self, message_type: str) -> bool:
+        if not self._tts or not getattr(self._tts, "enabled", False):
+            return False
+        if message_type == "group" and not self._tts_reply_in_group:
+            return False
+        if self._tts_reply_mode == "always":
+            return True
+        if self._tts_reply_mode == "random":
+            return random.random() < self._tts_reply_ratio
+        return False
+
+    async def _voice_reply(self, message_type: str, user_id: int, group_id: Optional[int], text: str) -> bool:
+        """语音回复：TTS 合成后发语音，失败降级为文字。"""
+        audio = await self._tts.synthesize(text)
+        if audio:
+            if message_type == "group" and group_id:
+                ok = await self.send_voice("group", group_id, audio)
+            else:
+                ok = await self.send_voice("private", user_id, audio)
+            if ok:
+                return True
+        # 降级为文字
+        if message_type == "group" and group_id:
+            return await self.send_group(group_id, text)
+        return await self.send_private(user_id, text)
 
     # ------------------------------------------------------------------ #
     # 群聊历史与 AI 决策

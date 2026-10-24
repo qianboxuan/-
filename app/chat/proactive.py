@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from ..business.handler import MessageHandler, split_long_reply
+from ..business.tts import TTSClient
 from ..config import Config
 from ..logging_setup import get_logger
 from .base import ChatAdapter
@@ -28,6 +29,7 @@ class ProactiveManager:
         self._config = config
         self._adapter = adapter
         self._handler = handler
+        self._tts = TTSClient(config)
         self._enabled = bool(config.get("chat.proactive.enabled", False))
         self._tasks: List[Dict[str, Any]] = config.get("chat.proactive.tasks", []) or []
         self._owner = int(config.get("chat.owner", 0) or 0)
@@ -218,6 +220,26 @@ class ProactiveManager:
     # ------------------------------------------------------------------ #
     async def handle_command(self, text: str, user_id: int) -> bool:
         """识别主人指令。返回 True 表示已处理（不再走正常消息处理）。"""
+        # /语音 指令：TTS 合成后发语音
+        if text.startswith("/语音") or text.startswith("/voice"):
+            content = ""
+            if " " in text or "\u3000" in text:
+                content = text.split(maxsplit=1)[1].strip()
+            if not content:
+                await self._adapter.send_private(user_id, "用法：/语音 想说的话")
+                return True
+            if not self._tts or not self._tts.enabled:
+                await self._adapter.send_private(user_id, "语音功能未开启（business.tts.enabled=false 或缺少 edge-tts）")
+                return True
+            audio = await self._tts.synthesize(content)
+            if audio:
+                ok = await self._adapter.send_voice("private", user_id, audio)
+                if not ok:
+                    await self._adapter.send_private(user_id, content)
+            else:
+                await self._adapter.send_private(user_id, content)
+            return True
+
         if not text.startswith("/send"):
             return False
         if self._owner and user_id != self._owner:

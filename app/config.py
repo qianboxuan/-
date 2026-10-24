@@ -120,6 +120,14 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
             "timeout": 20,
             "count": 5,           # 每次搜索返回的结果条数
         },
+        "tts": {                  # 文字转语音（发语音消息）
+            "enabled": False,
+            "voice": "zh-CN-XiaoyiNeural",  # 晓伊（活泼俏皮女声）
+            "output_dir": "data/voice",
+            "reply_mode": "off",      # off=只用/语音指令；always=全部语音；random=随机概率语音
+            "reply_ratio": 0.3,       # random 模式下语音回复的概率
+            "reply_in_group": False,  # 群聊是否也语音回复（默认只在私聊）
+        },
     },
     "logging": {
         "level": "INFO",
