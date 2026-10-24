@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import re
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -223,9 +224,24 @@ class ProactiveManager:
             return None
         return await gen(prompt)
 
-    async def _sing(self, user_id: int) -> None:
-        """随机唱一首内置短歌（edge-tts 带旋律感朗读），失败降级为文字。"""
-        song = random.choice(_SONGS)
+    def _parse_sing_intent(self, text: str):
+        """识别自然语言的唱歌意图，返回 (是否唱歌, 歌词或None)。"""
+        t = text.strip()
+        # 带歌词："把 XXX 唱出来" / "XXX 唱一下" / "唱这首歌：XXX"
+        m = re.match(r"^(?:把)?(.+?)[，,。]?(?:唱出来|唱一下)$", t)
+        if m and len(m.group(1).strip()) >= 2:
+            return True, m.group(1).strip()
+        m = re.match(r"^(?:唱这首歌|唱一下|唱出来)[:：\s]+(.+)$", t)
+        if m and m.group(1).strip():
+            return True, m.group(1).strip()
+        # 单纯唱歌指令（短消息）
+        if len(t) <= 15 and any(k in t for k in ("唱歌", "来一首", "唱首歌", "唱个歌")):
+            return True, None
+        return False, None
+
+    async def _sing(self, user_id: int, song_text: Optional[str] = None) -> None:
+        """唱歌（内置短歌或指定歌词），失败降级为文字。"""
+        song = (song_text or random.choice(_SONGS)).strip()
         if self._tts and self._tts.enabled:
             audio = await self._tts.synthesize(song)
             if audio:
@@ -263,6 +279,12 @@ class ProactiveManager:
         # /唱歌 指令：随机唱一首内置短歌
         if text.startswith("/唱歌") or text.startswith("/sing"):
             await self._sing(user_id)
+            return True
+
+        # 自然语言唱歌意图（来一首歌 / 把这个歌词唱出来）
+        is_sing, song_text = self._parse_sing_intent(text)
+        if is_sing:
+            await self._sing(user_id, song_text)
             return True
 
         if not text.startswith("/send"):
