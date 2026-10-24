@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 本地配置与敏感信息
+config.yaml
+.env
+
+# 日志
+logs/
+*.log
+
+# IDE
+.idea/
+.vscode/
+
+# WorkBuddy 工作数据（私有，不入库）
+.workbuddy/
+

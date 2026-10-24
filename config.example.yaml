@@ -1,0 +1,86 @@
+# ============================================================
+#  DeepSeek 接入 QQ —— 配置模板
+#  复制为 config.yaml 后按需修改（config.yaml 已被 .gitignore 忽略）
+#  优先级：环境变量 > .env > 本文件 > 内置默认值
+# ============================================================
+
+chat:
+  # 聊天渠道适配器名称
+  adapter: onebot11
+
+  onebot11:
+    # 连接模式：
+    #   reverse —— 本项目作 WebSocket 服务端，协议端（NapCat/LLOneBot 等）
+    #              以「反向 WS」主动连入（推荐，配置最简单、跨协议端通用）
+    #   forward —— 本项目作 WebSocket 客户端，主动连接协议端的「正向 WS」地址
+    mode: reverse
+
+    # ---- reverse 模式参数 ----
+    host: 127.0.0.1
+    port: 8080
+    path: /onebot/v11/ws
+
+    # ---- forward 模式参数 ----
+    ws_url: ws://127.0.0.1:3001/
+
+    # OneBot 鉴权 token（协议端启用鉴权时需一致；留空表示不鉴权）
+    access_token: ""
+
+    # 断线重连（forward 模式生效）
+    reconnect:
+      initial_delay: 1      # 首次重连等待秒数
+      max_delay: 30         # 最大等待秒数
+      backoff_factor: 2     # 指数退避系数
+      max_retries: -1       # 最大重连次数，-1 表示无限
+
+    # 心跳超时（秒），超过该时间未收到任何数据则判定连接僵死（保留字段）
+    heartbeat_timeout: 40
+
+  # 监听对象过滤（白名单，空列表=不过滤）
+  listen:
+    groups: []              # 仅监听这些群号
+    private_users: []       # 仅监听这些私聊用户 QQ 号
+    self_id: 0              # 机器人自身 QQ 号，0=忽略
+    ignore_self: true       # 忽略机器人自己发出的消息
+    group_keywords: []      # 群聊触发关键词：消息命中任一关键词（或 @机器人）才响应；空=每句都回
+    group_reply_mode: keyword  # 群聊回复模式：keyword=关键词/@触发；ai=AI联系上下文决策是否接话
+    group_history_max: 10      # AI 决策时保留的群聊历史条数
+
+  # 主人 QQ 号：允许使用 /send 指令主动发消息（0=不校验）
+  owner: 0
+
+  # 主动消息调度（定时任务 + 主人 /send 指令 + 随机冒泡，内容由 DeepSeek 生成）
+  proactive:
+    enabled: false          # 是否启用定时调度
+    tasks: []               # 定时任务列表，示例见下方注释
+    # - name: 早安
+    #   schedule: "08:00"     # 每天 HH:MM
+    #   type: private         # private=私聊 / group=群聊
+    #   target: 123456789     # 目标 QQ 号或群号
+    #   prompt: "给主人发一句早安问候"
+    random:                 # 不定时随机冒泡（主动发消息）
+      enabled: false
+      interval_min: 7200    # 最小间隔（秒）
+      interval_max: 43200   # 最大间隔（秒）
+      type: private         # private=私聊 / group=群聊
+      target: 0             # 目标 QQ 号或群号
+      prompt: "主动活跃群气氛：讲笑话、抛话题、分享冷知识"
+      pick_from_group: 0    # 在该群活跃（0=用固定 target）
+      mention_ratio: 0.3    # @ 人的概率（其余直接发内容）
+
+business:
+  # 业务处理器：echo（回显，用于联调）| deepseek（调用大模型）
+  handler: echo
+
+  deepseek:
+    api_key: ""             # 建议用环境变量 DEEPSEEK_API_KEY，勿提交到仓库
+    base_url: https://api.deepseek.com
+    model: deepseek-chat
+    system_prompt: 你是一个乐于助人的中文助手。
+    temperature: 0.7
+    max_tokens: 1024
+    timeout: 60
+
+logging:
+  level: INFO               # DEBUG | INFO | WARNING | ERROR
+  file: logs/qqbot.log      # 留空则仅输出到控制台

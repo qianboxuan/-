@@ -1,0 +1,8 @@
+# ===== OneBot 11 聊天接入核心依赖 =====
+websockets>=12.0,<16
+PyYAML>=6.0
+python-dotenv>=1.0
+
+# ===== 业务逻辑：DeepSeek 处理器（官方 OpenAI 兼容接口）=====
+# 仅当 business.handler = deepseek 时需要；echo 模式可跳过
+openai>=1.30,<3
