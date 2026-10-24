@@ -251,6 +251,18 @@ class ProactiveManager:
                     return
         await self._adapter.send_private(user_id, f"🎵 {song}")
 
+    async def _send_custom_face(self, user_id: int) -> None:
+        """随机发一个 QQ 收藏表情（自定义斗图）。"""
+        faces = await self._adapter.get_custom_faces()
+        if not faces:
+            await self._adapter.send_private(user_id, "没拿到收藏表情～可能是你还没收藏表情，或接口不可用")
+            return
+        face = random.choice(faces)
+        ok = await self._adapter.send_image_ref("private", user_id, face)
+        if not ok:
+            await self._adapter.send_private(user_id, "表情发送失败了，看看日志")
+            log.warning("收藏表情发送失败：%s", str(face)[:100])
+
     # ------------------------------------------------------------------ #
     # 主人指令
     # ------------------------------------------------------------------ #
@@ -285,6 +297,11 @@ class ProactiveManager:
         is_sing, song_text = self._parse_sing_intent(text)
         if is_sing:
             await self._sing(user_id, song_text)
+            return True
+
+        # /表情 指令：随机发一个收藏表情
+        if text.startswith("/表情") or text.startswith("/收藏表情"):
+            await self._send_custom_face(user_id)
             return True
 
         if not text.startswith("/send"):

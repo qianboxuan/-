@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import re
 import time
 import uuid
 from typing import Any, Dict, List, Optional
@@ -25,7 +26,7 @@ from typing import Any, Dict, List, Optional
 import websockets
 from websockets.exceptions import ConnectionClosed
 
-from ..business.handler import ChatContext, MessageHandler
+from ..business.handler import ChatContext, MessageHandler, split_long_reply
 from ..config import Config
 from ..logging_setup import get_logger
 from .base import ChatAdapter
@@ -257,6 +258,51 @@ class OneBot11Adapter(ChatAdapter):
             params["user_id"] = int(target)
         return await self._send_action("send_msg", params)
 
+    async def send_image_ref(self, message_type: str, target: int, file_ref: str) -> bool:
+        """用 URL 或 file 引用发送一张图片（用于收藏表情等）。"""
+        message: List[Dict[str, Any]] = [{"type": "image", "data": {"file": file_ref}}]
+        params: Dict[str, Any] = {"message_type": message_type, "message": message}
+        if message_type == "group":
+            params["group_id"] = int(target)
+        else:
+            params["user_id"] = int(target)
+        return await self._send_action("send_msg", params)
+
+    @staticmethod
+    def _build_segments(text: str) -> List[Dict[str, Any]]:
+        """把 [face:ID] 标记解析成 text + face 段交错的消息数组。"""
+        segments: List[Dict[str, Any]] = []
+        last = 0
+        for m in re.finditer(r"\[face:(\d+)\]", text):
+            if m.start() > last:
+                segments.append({"type": "text", "data": {"text": text[last:m.start()]}})
+            segments.append({"type": "face", "data": {"id": m.group(1)}})
+            last = m.end()
+        if last < len(text):
+            segments.append({"type": "text", "data": {"text": text[last:]}})
+        return segments or [{"type": "text", "data": {"text": text}}]
+
+    async def _send_segments(self, message_type: str, target: int, segments: List[Dict[str, Any]]) -> bool:
+        params: Dict[str, Any] = {"message_type": message_type, "message": segments}
+        if message_type == "group":
+            params["group_id"] = int(target)
+        else:
+            params["user_id"] = int(target)
+        return await self._send_action("send_msg", params)
+
+    async def _reply_with_faces(self, message_type: str, user_id: int, group_id: Optional[int], text: str) -> bool:
+        """把含表情的回复按句分段，逐条发送（表情混在话中）。"""
+        ok = True
+        target = user_id if message_type == "private" else group_id
+        parts = split_long_reply(text)
+        for i, part in enumerate(parts):
+            segments = self._build_segments(part)
+            r = await self._send_segments(message_type, target, segments)
+            ok = ok and r
+            if i < len(parts) - 1:
+                await asyncio.sleep(0.5)
+        return ok
+
     async def _send_action(self, action: str, params: Dict[str, Any]) -> bool:
         payload = {"action": action, "params": params, "echo": _new_echo()}
         await self._send_queue.put(json.dumps(payload, ensure_ascii=False))
@@ -293,6 +339,34 @@ class OneBot11Adapter(ChatAdapter):
                     "nickname": m.get("card") or m.get("nickname") or str(m["user_id"]),
                 })
         return members
+
+    async def get_custom_faces(self) -> List[str]:
+        """获取 QQ 收藏表情的图片 file/url 列表（fetch_custom_face）。失败返回空列表。"""
+        data = await self._call_api("fetch_custom_face", {})
+        result: List[str] = []
+        if isinstance(data, list):
+            for x in data:
+                if isinstance(x, str) and x:
+                    result.append(x)
+                elif isinstance(x, dict):
+                    for k in ("url", "file", "path"):
+                        if x.get(k):
+                            result.append(str(x[k]))
+                            break
+        elif isinstance(data, dict):
+            for k in ("data", "faces", "list", "result", "urls"):
+                if isinstance(data.get(k), list):
+                    for x in data[k]:
+                        if isinstance(x, str) and x:
+                            result.append(x)
+                        elif isinstance(x, dict):
+                            for kk in ("url", "file", "path"):
+                                if x.get(kk):
+                                    result.append(str(x[kk]))
+                                    break
+        if not result:
+            log.warning("fetch_custom_face 未返回表情（原始：%s）", str(data)[:200])
+        return result
 
     async def _sender_loop(self) -> None:
         """单一写者：串行地把待发消息写入当前 WebSocket 连接。"""
@@ -541,9 +615,12 @@ class OneBot11Adapter(ChatAdapter):
         if reply:
             if self._should_voice_reply(message_type):
                 ok = await self._voice_reply(message_type, user_id, group_id, reply)
+            elif "[face:" in reply:
+                # 话中已穿插表情，解析成段后分段发送
+                ok = await self._reply_with_faces(message_type, user_id, group_id, reply)
             else:
                 ok = await ctx.reply(reply)
-                # 随机附带一个 QQ 小黄脸表情
+                # 兜底：随机附带一个 QQ 小黄脸表情
                 if ok and self._face_enabled and random.random() < self._face_ratio:
                     target = user_id if message_type == "private" else group_id
                     if target:
