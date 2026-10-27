@@ -145,7 +145,7 @@ class DeepSeekHandler(MessageHandler):
         if self._long_memory:
             mem_text = "\n".join(f"- {m}" for m in self._long_memory)
             messages.append({"role": "system",
-                             "content": f"以下是主人让你记住的信息，回答时可自然参考（不要刻意复述）：\n{mem_text}"})
+                             "content": f"以下是老大让你记住的信息，回答时可自然参考（不要刻意复述）：\n{mem_text}"})
         if search_context:
             messages.append({"role": "system",
                              "content": f"以下是联网搜索到的实时信息，请优先参考它来准确回答：\n{search_context}"})
@@ -210,3 +210,20 @@ class DeepSeekHandler(MessageHandler):
         if result.startswith("[SKIP]") or result.strip() == "":
             return None
         return result
+
+    async def boot_digest_reply(self, digest_text: str) -> Optional[str]:
+        """开机综合播报：根据最近的群/私聊消息，生成一段符合人设的综合回复。
+
+        返回 None 表示无法生成（如模型调用失败）。
+        """
+        system = (
+            self.system_prompt
+            + "\n\n【特殊场景：开机综合播报】你刚上线，下面是你读到的最近聊天记录。"
+            "请综合这些内容，给你所在的会话一段自然、有灵魂的回应：\n"
+            "- 有@你、提到「肥鱼/哦鲸鲸」或问你话的，认真接上；\n"
+            "- 在聊别的话题就挑你感兴趣或能插嘴的一点，轻松带过；\n"
+            "- 完全与你无关就简短说你上线了、在摸鱼；\n"
+            "- 不要逐条复述，要把消息综合成你自己的话；\n"
+            "- 用 2~5 句超短句、句号结尾、碎片化，绝不写长段落。"
+        )
+        return await self._chat(system, f"最近聊天记录：\n{digest_text}")

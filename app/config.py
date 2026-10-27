@@ -104,6 +104,14 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
             "cache_seconds": 600, # 收藏表情列表缓存时长（秒），避免每次回复都调接口
             "in_group": True,     # 群聊是否也发
         },
+        "boot_digest": {          # 开机综合播报：连入后读取群/私聊最近聊天，综合成一段回复发回
+            "enabled": True,
+            "groups": [],           # 要读取的群号（务必显式指定，空=不读群，避免拉取全部群）
+            "private_users": [],    # 要读取的私聊对象 QQ（空=不读私聊）
+            "group_count": 20,      # 每个群拉取最近消息条数
+            "private_count": 10,    # 每个私聊拉取最近消息条数
+            "delay_seconds": 3,     # 连入后延迟几秒再拉，等协议端就绪
+        },
     },
     "business": {
         "handler": "echo",  # echo | deepseek

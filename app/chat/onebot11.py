@@ -404,6 +404,101 @@ class OneBot11Adapter(ChatAdapter):
         except Exception:
             log.exception("收藏表情预热失败")
 
+    async def _boot_digest(self) -> None:
+        """开机综合播报：协议端连入后，读取配置的群/私聊最近聊天，让肥鱼综合成一段回复发回。"""
+        cfg = self._config.get("chat.boot_digest", {}) or {}
+        if not cfg.get("enabled", True):
+            return
+        # 等待几秒，确保协议端（NapCat）完全就绪、历史接口可用
+        await asyncio.sleep(float(cfg.get("delay_seconds", 3)))
+        if not hasattr(self._handler, "boot_digest_reply"):
+            log.warning("当前业务处理器不支持开机综合播报（缺少 boot_digest_reply 方法）")
+            return
+        try:
+            groups = [int(x) for x in (cfg.get("groups") or [])]
+            privates = [int(x) for x in (cfg.get("private_users") or [])]
+            group_count = int(cfg.get("group_count", 20))
+            private_count = int(cfg.get("private_count", 10))
+            if not groups and not privates:
+                log.info("开机综合播报：未配置任何群/私聊（chat.boot_digest.groups/private_users 为空），跳过")
+                return
+
+            # 群聊：逐群拉取最近聊天 -> 综合生成 -> 发回该群
+            for gid in groups:
+                msgs = await self._fetch_group_history(gid, group_count)
+                if not msgs:
+                    log.info("开机综合：群 %s 无最近消息，跳过", gid)
+                    continue
+                digest = "\n".join(msgs)
+                reply = await self._handler.boot_digest_reply(f"【群 {gid}】\n{digest}")
+                if reply:
+                    reply = self._convert_face(reply)
+                    ok = await self.send_group(gid, reply)
+                    log.info("开机综合 -> 群 %s %s：%s", gid, "成功" if ok else "失败", reply[:120])
+            # 私聊：逐人拉取最近聊天 -> 综合生成 -> 发回该私聊
+            for uid in privates:
+                msgs = await self._fetch_private_history(uid, private_count)
+                if not msgs:
+                    log.info("开机综合：私聊 %s 无最近消息（离线私聊通常无法拉取），跳过", uid)
+                    continue
+                digest = "\n".join(msgs)
+                reply = await self._handler.boot_digest_reply(f"【私聊 {uid}】\n{digest}")
+                if reply:
+                    reply = self._convert_face(reply)
+                    ok = await self.send_private(uid, reply)
+                    log.info("开机综合 -> 私聊 %s %s：%s", uid, "成功" if ok else "失败", reply[:120])
+        except Exception:
+            log.exception("开机综合播报执行出错")
+
+    async def _fetch_group_history(self, group_id: int, count: int) -> List[str]:
+        """拉取群最近消息（NapCat 扩展 get_group_msg_history），返回 '昵称: 文本' 列表。"""
+        data = await self._call_api(
+            "get_group_msg_history",
+            {"group_id": int(group_id), "message_id": 0},
+            timeout=15.0,
+        )
+        if not isinstance(data, dict):
+            log.warning("拉取群 %s 历史失败（返回：%s）", group_id, str(data)[:200])
+            return []
+        msgs = data.get("messages") or []
+        out: List[str] = []
+        for m in msgs:
+            if not isinstance(m, dict) or len(out) >= count:
+                continue
+            sender = m.get("sender") or {}
+            nick = sender.get("nickname") or sender.get("card") or str(sender.get("user_id", ""))
+            text = extract_text(m.get("message"))
+            if text:
+                out.append(f"{nick}: {text}")
+        log.info("拉取群 %s 历史 %d 条（有效 %d 条）", group_id, len(msgs), len(out))
+        return out
+
+    async def _fetch_private_history(self, user_id: int, count: int) -> List[str]:
+        """拉取私聊最近消息（NapCat 扩展 get_friend_msg_history，受 QQ 限制可能为空）。"""
+        data = await self._call_api(
+            "get_friend_msg_history",
+            {"user_id": int(user_id), "message_id": 0},
+            timeout=15.0,
+        )
+        if not isinstance(data, dict):
+            log.warning("拉取私聊 %s 历史失败（返回：%s）", user_id, str(data)[:200])
+            return []
+        msgs = data.get("messages") or []
+        out: List[str] = []
+        self_qq = self.self_id or 0
+        for m in msgs:
+            if not isinstance(m, dict) or len(out) >= count:
+                continue
+            sender = m.get("sender") or {}
+            uid = sender.get("user_id") or m.get("user_id") or 0
+            nick = sender.get("nickname") or str(uid)
+            text = extract_text(m.get("message"))
+            if text:
+                role = "我" if int(uid) == self_qq else nick
+                out.append(f"{role}: {text}")
+        log.info("拉取私聊 %s 历史 %d 条（有效 %d 条）", user_id, len(msgs), len(out))
+        return out
+
     async def maybe_send_sticker(self, message_type: str, target: int) -> bool:
         """按概率主动发一张收藏的自定义表情图片（斗图）。返回是否真的发了。"""
         if not self._sticker_enabled:
@@ -515,6 +610,8 @@ class OneBot11Adapter(ChatAdapter):
         # 预热：若启用了收藏表情，连入后主动拉取一次（顺带验证接口可用性）
         if self._sticker_enabled:
             asyncio.create_task(self._warmup_stickers())
+        # 开机综合播报：连入后读取群/私聊最近消息，让肥鱼综合成一段回复发回
+        asyncio.create_task(self._boot_digest())
         try:
             async for raw in ws:
                 self._last_event_time = time.monotonic()
